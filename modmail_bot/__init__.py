@@ -1,0 +1,1 @@
+# This file makes modmail_bot a package.
