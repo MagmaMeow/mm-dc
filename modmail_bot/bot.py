@@ -2,7 +2,7 @@ import os
 import sys
 import discord
 from discord.ext import commands
-from discord import app_commands
+from discord import app_commands, ui, Interaction
 from flask import Flask
 import threading
 
@@ -42,6 +42,36 @@ tree = bot.tree
 # --- In-memory user-thread mapping ---
 user_threads = {}  # user_id -> thread_id
 
+# --- Close Button ---
+class CloseButton(ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+
+    @ui.button(label="Close Thread", style=discord.ButtonStyle.danger)
+    async def close_button(self, interaction: Interaction, button: ui.Button):
+        channel = interaction.channel
+
+        # Only allow inside threads under modmail channel
+        if not isinstance(channel, discord.Thread) or not channel.parent or channel.parent.id != MODMAIL_CHANNEL_ID:
+            await interaction.response.send_message("This button only works inside a modmail thread.", ephemeral=True)
+            return
+
+        # Notify the user
+        if self.user_id in user_threads:
+            try:
+                user = await bot.fetch_user(self.user_id)
+                await user.send("Your modmail thread has been closed by a moderator. Thank you!")
+            except discord.Forbidden:
+                pass
+            del user_threads[self.user_id]
+
+        # Archive and lock the thread
+        await channel.send("This modmail thread has been closed. The thread will now be archived.")
+        await channel.edit(archived=True, locked=True)
+
+        await interaction.response.send_message("Thread successfully closed.", ephemeral=True)
+
 # --- Discord Events ---
 @bot.event
 async def on_ready():
@@ -71,8 +101,10 @@ async def on_message(message):
         if message.author.id in user_threads:
             try:
                 thread = await guild.fetch_channel(user_threads[message.author.id])
-            except:
-                pass
+                if not isinstance(thread, discord.Thread):
+                    raise Exception("Invalid thread")
+            except Exception:
+                thread = None
 
         if not thread:
             thread_message = await modmail_channel.send(f"Modmail from {message.author.mention} ({message.author.id})")
@@ -81,6 +113,9 @@ async def on_message(message):
                 message=thread_message
             )
             user_threads[message.author.id] = thread.id
+
+            # Add close button when creating new thread
+            await thread.send("Moderator controls:", view=CloseButton(message.author.id))
 
         await thread.send(f"**User:** {message.content}")
 
@@ -115,43 +150,6 @@ async def modcall(interaction: discord.Interaction):
     except discord.Forbidden:
         await interaction.response.send_message("Failed to DM you. Please check your privacy settings.", ephemeral=True)
 
-@tree.command(
-    name="close",
-    description="Close the current modmail thread",
-    guild=discord.Object(id=GUILD_ID)
-)
-async def close(interaction: discord.Interaction):
-    channel = interaction.channel
-
-    # Only allow inside threads under modmail channel
-    if not isinstance(channel, discord.Thread) or not channel.parent or channel.parent.id != MODMAIL_CHANNEL_ID:
-        await interaction.response.send_message("This command can only be used inside a modmail thread.", ephemeral=True)
-        return
-
-    # Find the user
-    user_id = None
-    for uid, tid in user_threads.items():
-        if tid == channel.id:
-            user_id = uid
-            break
-
-    # Notify the user
-    if user_id:
-        try:
-            user = await bot.fetch_user(user_id)
-            await user.send("Your modmail thread has been closed by a moderator. Thank you!")
-        except discord.Forbidden:
-            pass
-        # Remove mapping
-        del user_threads[user_id]
-
-    # Archive and lock the thread
-    await channel.send("This modmail thread has been closed. The thread will be archived.")
-    await channel.edit(archived=True, locked=True)
-
-    # Confirm to moderator
-    await interaction.response.send_message("Thread successfully closed.", ephemeral=True)
-
 # --- Flask Keep-Alive ---
 app = Flask(__name__)
 
@@ -160,8 +158,9 @@ def home():
     return "Bot is running!"
 
 def run_flask():
-    port = int(os.environ.get("PORT", 2000))
-    app.run(host="0.0.0.0", port=port)
+    port = os.environ.get("PORT")  # Render provides PORT
+    if port:
+        app.run(host="0.0.0.0", port=int(port))
 
 # --- Start Flask in a separate thread ---
 threading.Thread(target=run_flask).start()
